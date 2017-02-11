@@ -71,6 +71,7 @@ UA = function(configuration) {
   this.data = {};
   this.sessions = {};
   this.subscriptions = {};
+  this.earlySubscriptions = {};
   this.transport = null;
   this.contact = null;
   this.status = C.STATUS_INIT;
@@ -171,14 +172,6 @@ UA = function(configuration) {
 
   if(this.configuration.autostart) {
     this.start();
-  }
-
-  if (typeof environment.addEventListener === 'function') {
-    // Google Chrome Packaged Apps don't allow 'unload' listeners:
-    // unload is not available in packaged apps
-    if (!(global.chrome && global.chrome.app && global.chrome.app.runtime)) {
-      environment.addEventListener('unload', this.stop.bind(this));
-    }
   }
 };
 UA.prototype = Object.create(SIP.EventEmitter.prototype);
@@ -318,10 +311,16 @@ UA.prototype.stop = function() {
     this.sessions[session].terminate();
   }
 
-  //Run _close_ on every Subscription
+  //Run _close_ on every confirmed Subscription
   for(subscription in this.subscriptions) {
     this.logger.log('unsubscribing from subscription ' + subscription);
     this.subscriptions[subscription].close();
+  }
+
+  //Run _close_ on every early Subscription
+  for(subscription in this.earlySubscriptions) {
+    this.logger.log('unsubscribing from early subscription ' + subscription);
+    this.earlySubscriptions[subscription].close();
   }
 
   // Run  _close_ on every applicant
@@ -343,6 +342,14 @@ UA.prototype.stop = function() {
     this.transport.disconnect();
   } else {
     this.on('transactionDestroyed', transactionsListener);
+  }
+
+  if (typeof environment.removeEventListener === 'function') {
+    // Google Chrome Packaged Apps don't allow 'unload' listeners:
+    // unload is not available in packaged apps
+    if (!(global.chrome && global.chrome.app && global.chrome.app.runtime)) {
+      environment.removeEventListener('unload', this.environListener);
+    }
   }
 
   return this;
@@ -371,6 +378,15 @@ UA.prototype.start = function() {
     this.logger.log('UA is in READY status, not resuming');
   } else {
     this.logger.error('Connection is down. Auto-Recovery system is trying to connect');
+  }
+
+  if (typeof environment.addEventListener === 'function') {
+    // Google Chrome Packaged Apps don't allow 'unload' listeners:
+    // unload is not available in packaged apps
+    if (!(global.chrome && global.chrome.app && global.chrome.app.runtime)) {
+      this.environListener = this.stop.bind(this);
+      environment.addEventListener('unload', this.environListener);
+    }
   }
 
   return this;
@@ -571,7 +587,7 @@ UA.prototype.destroyTransaction = function(transaction) {
  * @param {SIP.IncomingRequest} request.
  */
 UA.prototype.receiveRequest = function(request) {
-  var dialog, session, message,
+  var dialog, session, message, earlySubscription,
     method = request.method,
     transaction,
     replaces,
@@ -707,10 +723,13 @@ UA.prototype.receiveRequest = function(request) {
       dialog.receiveRequest(request);
     } else if (method === SIP.C.NOTIFY) {
       session = this.findSession(request);
+      earlySubscription = this.findEarlySubscription(request);
       if(session) {
         session.receiveRequest(request);
+      } else if(earlySubscription) {
+        earlySubscription.receiveRequest(request);
       } else {
-        this.logger.warn('received NOTIFY request for a non existent session');
+        this.logger.warn('received NOTIFY request for a non existent session or subscription');
         request.reply(481, 'Subscription does not exist');
       }
     }
@@ -753,6 +772,16 @@ UA.prototype.findDialog = function(request) {
   return this.dialogs[request.call_id + request.from_tag + request.to_tag] ||
           this.dialogs[request.call_id + request.to_tag + request.from_tag] ||
           null;
+};
+
+/**
+ * Get the subscription which has not been confirmed to which the request belongs to, if any
+ * @private
+ * @param {SIP.IncomingRequest}
+ * @returns {SIP.Subscription|null}
+ */
+UA.prototype.findEarlySubscription = function(request) {
+  return this.earlySubscriptions[request.call_id + request.to_tag + request.getHeader('event')] || null;
 };
 
 /**
@@ -1155,6 +1184,7 @@ UA.configuration_skeleton = (function() {
       "replaces",
       "userAgentString", //SIP.C.USER_AGENT
       "autostart",
+      "rtcpMuxPolicy",
       "stunServers",
       "traceSip",
       "turnServers",
@@ -1529,7 +1559,7 @@ UA.configuration_check = {
           turn_server.urls = [turn_server.server];
         }
 
-        if (!turn_server.urls || !turn_server.username || !turn_server.password) {
+        if (!turn_server.urls) {
           return;
         }
 
@@ -1553,6 +1583,12 @@ UA.configuration_check = {
         }
       }
       return turnServers;
+    },
+
+    rtcpMuxPolicy: function(rtcpMuxPolicy) {
+      if (typeof rtcpMuxPolicy === 'string') {
+        return rtcpMuxPolicy;
+      }
     },
 
     userAgentString: function(userAgentString) {

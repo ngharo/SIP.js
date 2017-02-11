@@ -388,11 +388,14 @@ MediaHandler.prototype = Object.create(SIP.MediaHandler.prototype, {
     });
 
     [].concat(turnServers).forEach(function (server) {
-      servers.push({
-        'urls': server.urls,
-        'username': server.username,
-        'credential': server.password
-      });
+      var turnServer = {'urls': server.urls};
+      if (server.username) {
+        turnServer.username = server.username;
+      }
+      if (server.password) {
+        turnServer.credential = server.password;
+      }
+      servers.push(turnServer);
     });
 
     return servers;
@@ -415,7 +418,15 @@ MediaHandler.prototype = Object.create(SIP.MediaHandler.prototype, {
       this.peerConnection.close();
     }
 
-    this.peerConnection = new SIP.WebRTC.RTCPeerConnection({'iceServers': servers});
+    var connConfig = {
+      iceServers: servers
+    };
+
+    if (config.rtcpMuxPolicy) {
+      connConfig.rtcpMuxPolicy = config.rtcpMuxPolicy;
+    }
+
+    this.peerConnection = new SIP.WebRTC.RTCPeerConnection(connConfig);
 
     // Firefox (35.0.1) sometimes throws on calls to peerConnection.getRemoteStreams
     // even if peerConnection.onaddstream was just called. In order to make
